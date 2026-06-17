@@ -1,4 +1,4 @@
-import asyncio
+1import asyncio
 import time
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -54,6 +54,11 @@ def make_keyboard():
             InlineKeyboardButton(text="🔄 Обновить статус", callback_data="action_refresh")
         ]
     ])
+@dp.message(F.photo)
+async def get_photo_id(message: Message):
+    print(f"ID картинки: {message.photo[-1].file_id}")
+    await message.answer("ID получен, проверь логи!")
+
 
 @dp.message(CommandStart())
 async def start_cmd(message: Message):
