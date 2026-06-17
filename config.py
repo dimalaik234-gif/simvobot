@@ -1,7 +1,7 @@
 # config.py
-BOT_TOKEN = "8816734888:AAG6gApnQMqt01gfkzM-O1-L43cFnBytdgk"
 
-# Словарь картинок (чистый синтаксис, без лишних JSON-блоков)
+BOT_TOKEN = "8816734888:AAG6gApnQMqt01gfkzM-O1-L43cFnBytdgk" # Не забудь вставить сюда реальный токен от BotFather
+
 IMAGES = {
     "egg": "AgACAgIAAxkBAAEq0YRqMox4K8zQfyQifqRqoMKGgev3ZwACqxxrGxvakUmI9XL5NsIH6QEAAwIAA3kAAzwE",
     "baby": "AgACAgIAAxkBAAEq0aNqMo0jsheksMYEJQ39I6zFTZwtsgACrhxrGxvakUn43UGRjwQftQEAAwIAA3kAAzwE",
