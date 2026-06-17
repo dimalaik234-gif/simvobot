@@ -1,4 +1,3 @@
-import sys
 import time
 import sqlite3
 import logging
@@ -13,7 +12,7 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
-# Инициализация БД
+# --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ---
 conn = sqlite3.connect("tamagotchi.db")
 cursor = conn.cursor()
 cursor.execute("""
@@ -30,9 +29,13 @@ CREATE TABLE IF NOT EXISTS pets (
 """)
 conn.commit()
 
-# --- ВСПОМОГАТЕЛЬНАЯ ЛОГИКА ---
+# --- ВРЕМЯ ЭВОЛЮЦИИ (в секундах) ---
+TIME_TO_HATCH = 120    # 2 минуты до вылупления яйца
+TIME_TO_GROW = 600     # 10 минут от младенца до Скриптика
+TIME_TO_FINAL = 1200   # 20 минут до Кибер-Кота
+
+# --- ЛОГИКА ЖИЗНИ И ВРЕМЕНИ ---
 def get_updated_pet(user_id):
-    """Извлекает данные, считает пассивное время и эволюцию"""
     cursor.execute("SELECT name, stage, satiety, energy, last_update, born_time, is_sleeping FROM pets WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     if not row:
@@ -43,50 +46,48 @@ def get_updated_pet(user_id):
     time_passed = current_time - last_update
     total_age = current_time - born_time
     
-    # 1. Пассивное падение характеристик (если питомец не спит)
+    # 1. Изменение характеристик
     if not is_sleeping:
-        # Теряет 5 единиц сытости и энергии в час
-        decay = int((time_passed / 3600.0) * 5)
+        decay = int((time_passed / 3600.0) * 5) # -5 в час
         if decay > 0:
             satiety = max(0, satiety - decay)
             energy = max(0, energy - decay)
     else:
-        # Если спит, энергия растет (например, +15 в час), а сытость падает чуть медленнее (-2 в час)
-        energy_gain = int((time_passed / 3600.0) * 15)
-        satiety_decay = int((time_passed / 3600.0) * 2)
+        energy_gain = int((time_passed / 3600.0) * 15) # +15 в час во сне
+        satiety_decay = int((time_passed / 3600.0) * 2) # -2 в час во сне
         if energy_gain > 0:
             energy = min(100, energy + energy_gain)
             satiety = max(0, satiety - satiety_decay)
 
-    # 2. АВТОМАТИЧЕСКАЯ ЭВОЛЮЦИЯ (Временные интервалы для теста можно уменьшить)
-    # Яйцо вылупляется через 2 минуты (120 секунд) после старта
-    if stage == "Яйцо" and total_age >= 120:
-        stage = "Младенец"
-        satiety = 60
-        energy = 60
-    # Младенец растет в Скриптика через 10 минут (600 секунд)
-    elif stage == "Младенец" and total_age >= 600:
-        stage = "Скриптик"
-    
-    # Смерть / Ошибка 404
+    # 2. Эволюция и смерть
     if satiety <= 0 and stage != "Ошибка 404":
         stage = "Ошибка 404"
-    # Финальная эволюция в Кибер-Кота (если Скриптик сыт и здоров, например через 20 минут общего времени)
-    elif stage == "Скриптик" and satiety > 80 and total_age >= 1200:
+        is_sleeping = 0
+    elif stage == "Яйцо" and total_age >= TIME_TO_HATCH:
+        stage = "Младенец"
+        satiety, energy = 60, 60
+    elif stage == "Младенец" and total_age >= TIME_TO_GROW:
+        stage = "Скриптик"
+    elif stage == "Скриптик" and satiety > 80 and total_age >= TIME_TO_FINAL:
         stage = "Кибер-Кот"
         
-    # Сохраняем изменения
     cursor.execute("""
         UPDATE pets 
-        SET satiety = ?, energy = ?, stage = ?, last_update = ?
+        SET satiety = ?, energy = ?, stage = ?, last_update = ?, is_sleeping = ?
         WHERE user_id = ?
-    """, (satiety, energy, stage, current_time, user_id))
+    """, (satiety, energy, stage, current_time, is_sleeping, user_id))
     conn.commit()
     
-    return {"name": name, "stage": stage, "satiety": satiety, "energy": energy, "is_sleeping": is_sleeping}
+    return {
+        "name": name, "stage": stage, "satiety": satiety, 
+        "energy": energy, "is_sleeping": is_sleeping, "total_age": total_age
+    }
 
-def get_main_keyboard(is_sleeping=False):
-    """Клавиатура меняется в зависимости от того, спит бот или нет"""
+# --- КЛАВИАТУРА ---
+def get_main_keyboard(is_sleeping=False, stage=""):
+    if stage == "Ошибка 404":
+        return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🔄 Начать заново")]], resize_keyboard=True)
+    
     sleep_btn = "⏰ Проснуться" if is_sleeping else "💤 Уложить спать"
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -96,8 +97,19 @@ def get_main_keyboard(is_sleeping=False):
         resize_keyboard=True
     )
 
-# --- ХЕНДЛЕРЫ ---
+# --- ОТПРАВКА КАРТИНОК С УМНОЙ ПРОВЕРКОЙ ---
+async def send_smart_photo(message: Message, photo_id: str, caption: str, reply_markup=None):
+    """Пытается отправить фото. Если это заглушка, отправляет текст с предупреждением."""
+    if photo_id.startswith("PLACEHOLDER"):
+        warning = "\n\n🖼 *(Тут должна быть картинка. Отправь мне фото, скопируй ID и вставь в config.py)*"
+        await message.answer(caption + warning, reply_markup=reply_markup)
+    else:
+        try:
+            await message.answer_photo(photo=photo_id, caption=caption, reply_markup=reply_markup)
+        except Exception:
+            await message.answer(caption + "\n\n❌ *(Ошибка: неверный file_id в config.py!)*", reply_markup=reply_markup)
 
+# --- ХЕНДЛЕРЫ ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.from_user.id
@@ -105,111 +117,116 @@ async def cmd_start(message: Message):
     
     if not pet:
         current_time = int(time.time())
-        # НАЧАЛО С ЯЙЦА
         cursor.execute("""
             INSERT INTO pets (user_id, name, stage, satiety, energy, last_update, born_time, is_sleeping)
             VALUES (?, ?, ?, ?, ?, ?, ?, 0)
         """, (user_id, "Скриптик", "Яйцо", 100, 100, current_time, current_time))
         conn.commit()
         
-        status_text = "🥚 Ты получил загадочное цифровое яйцо! Подожди немного, пока оно начнет трескаться..."
-        try:
-            await message.answer_photo(photo=config.IMAGES.get("egg"), caption=status_text, reply_markup=get_main_keyboard())
-        except Exception:
-            await message.answer(status_text, reply_markup=get_main_keyboard())
+        await send_smart_photo(
+            message, config.IMAGES["egg"], 
+            "🥚 Ты получил загадочное цифровое яйцо!\nОно теплое на ощупь. Следи за статусом, чтобы узнать, когда оно вылупится.",
+            get_main_keyboard(stage="Яйцо")
+        )
     else:
-        await message.answer("Скриптик уже ждет тебя!", reply_markup=get_main_keyboard(pet['is_sleeping']))
+        await message.answer("Твой питомец уже здесь!", reply_markup=get_main_keyboard(pet['is_sleeping'], pet['stage']))
+
+@dp.message(F.text == "🔄 Начать заново")
+async def restart_game(message: Message):
+    cursor.execute("DELETE FROM pets WHERE user_id = ?", (message.from_user.id,))
+    conn.commit()
+    await cmd_start(message)
 
 @dp.message(F.text == "📊 Статус")
 async def pet_status(message: Message):
     pet = get_updated_pet(message.from_user.id)
-    if not pet: return
+    if not pet: return await message.answer("Сначала напиши /start")
     
+    # Расчет таймеров
+    timer_text = ""
+    if pet['stage'] == "Яйцо":
+        left = max(0, TIME_TO_HATCH - pet['total_age'])
+        timer_text = f"\n⏳ До вылупления: {left} сек."
+    elif pet['stage'] == "Младенец":
+        left = max(0, TIME_TO_GROW - pet['total_age'])
+        timer_text = f"\n⏳ До взросления: {left // 60} мин {left % 60} сек."
+    elif pet['stage'] == "Скриптик":
+        left = max(0, TIME_TO_FINAL - pet['total_age'])
+        timer_text = f"\n⏳ До финальной эволюции: {left // 60} мин {left % 60} сек."
+
+    # Прогресс-бары
     sat_bar = "🟩" * (pet['satiety'] // 10) + "⬜" * (10 - (pet['satiety'] // 10))
     en_bar = "🟨" * (pet['energy'] // 10) + "⬜" * (10 - (pet['energy'] // 10))
     
     status_text = (
         f"👾 Имя: {pet['name']}\n"
-        f"🧬 Стадия: {pet['stage']}\n"
+        f"🧬 Стадия: {pet['stage']}{timer_text}\n"
         f"🍖 Сытость: {pet['satiety']}% [{sat_bar}]\n"
         f"⚡ Энергия: {pet['energy']}% [{en_bar}]\n"
-        f" Состояние: {'Спит 💤' if pet['is_sleeping'] else 'Бодрствует 🐾'}"
+        f"🛌 Состояние: {'Спит 💤' if pet['is_sleeping'] else 'Бодрствует 🐾'}"
     )
     
-    # Динамический выбор картинки для СТАТУСА
+    # Выбор картинки
     if pet['is_sleeping']:
-        photo_id = config.IMAGES.get("sleep")  # Если спит — всегда картинка сна
+        photo_id = config.IMAGES["sleep"]
     else:
-        # Иначе картинка строго по его возрасту/стадии
         stage_images = {
-            "Яйцо": config.IMAGES.get("egg"),
-            "Младенец": config.IMAGES.get("baby"),
-            "Скриптик": config.IMAGES.get("grows"),
-            "Кибер-Кот": config.IMAGES.get("cat"),
-            "Ошибка 404": config.IMAGES.get("error404")
+            "Яйцо": config.IMAGES["egg"],
+            "Младенец": config.IMAGES["baby"],
+            "Скриптик": config.IMAGES["grows"],
+            "Кибер-Кот": config.IMAGES["cat"],
+            "Ошибка 404": config.IMAGES["error404"]
         }
         photo_id = stage_images.get(pet['stage'])
     
-    try:
-        await message.answer_photo(photo=photo_id, caption=status_text)
-    except Exception:
-        await message.answer(status_text + "\n\n*(Графика настраивается)*")
+    await send_smart_photo(message, photo_id, status_text)
 
 @dp.message(F.text == "🍖 Покормить")
 async def feed_pet(message: Message):
-    user_id = message.from_user.id
-    pet = get_updated_pet(user_id)
+    pet = get_updated_pet(message.from_user.id)
     if not pet: return
     
     if pet['stage'] == "Ошибка 404":
-        return await message.answer("Ему уже ничего не поможет...")
+        return await message.answer("Мертвые пиксели не едят...")
     if pet['is_sleeping']:
-        return await message.answer("Тссс, Скриптик спит! Не надо его кормить.")
+        return await message.answer("Тссс, он спит! Сначала разбуди его.")
     if pet['stage'] == "Яйцо":
-        return await message.answer("Яйцо нельзя покормить, нужно дождаться вылупления!")
+        return await message.answer("Яйцо нельзя кормить. Подожди, пока оно вылупится (нажми 'Статус').")
 
-    new_satiety = min(100, pet['satiety'] + 20)
-    cursor.execute("UPDATE pets SET satiety = ?, last_update = ? WHERE user_id = ?", (new_satiety, int(time.time()), user_id))
+    new_sat = min(100, pet['satiety'] + 20)
+    cursor.execute("UPDATE pets SET satiety = ?, last_update = ? WHERE user_id = ?", (new_sat, int(time.time()), message.from_user.id))
     conn.commit()
     
-    # КОРМЛЕНИЕ: Показываем картинку кормления ("feed"), только если это не заглушка
-    try:
-        await message.answer_photo(photo=config.IMAGES.get("feed"), caption="Ням-ням! Питомец доволен!")
-    except Exception:
-        await message.answer("Ням-ням! Питомец доволен!")
+    await send_smart_photo(message, config.IMAGES["feed"], "Ням-ням! Ты покормил питомца (+20 сытости).")
 
 @dp.message(F.text.in_({"💤 Уложить спать", "⏰ Проснуться"}))
 async def toggle_sleep(message: Message):
-    user_id = message.from_user.id
-    pet = get_updated_pet(user_id)
+    pet = get_updated_pet(message.from_user.id)
     if not pet: return
     
-    if pet['stage'] == "Яйцо":
-        return await message.answer("Яйцо не может спать по команде.")
+    if pet['stage'] in ["Ошибка 404", "Яйцо"]:
+        return await message.answer("Сейчас это действие недоступно.")
         
-    # Переключаем статус сна
-    new_sleep_state = 0 if pet['is_sleeping'] else 1
-    cursor.execute("UPDATE pets SET is_sleeping = ?, last_update = ? WHERE user_id = ?", (new_sleep_state, int(time.time()), user_id))
+    new_sleep = 0 if pet['is_sleeping'] else 1
+    cursor.execute("UPDATE pets SET is_sleeping = ?, last_update = ? WHERE user_id = ?", (new_sleep, int(time.time()), message.from_user.id))
     conn.commit()
     
-    if new_sleep_state == 1:
-        text = "Хр-р-р... Скриптик уснул. Энергия восстанавливается."
-        photo = config.IMAGES.get("sleep")
+    if new_sleep == 1:
+        await send_smart_photo(message, config.IMAGES["sleep"], "Пип-пип... Система переходит в спящий режим. Энергия восстанавливается.", get_main_keyboard(True, pet['stage']))
     else:
-        text = "Скриптик проснулся и готов к приключениям!"
-        photo = config.IMAGES.get("baby" if pet['stage'] == "Младенец" else "grows")
+        photo = config.IMAGES["baby"] if pet['stage'] == "Младенец" else config.IMAGES["grows"]
+        if pet['stage'] == "Кибер-Кот": photo = config.IMAGES["cat"]
+        await send_smart_photo(message, photo, "Бодрое утро! Питомец готов к активности.", get_main_keyboard(False, pet['stage']))
 
-    try:
-        await message.answer_photo(photo=photo, caption=text, reply_markup=get_main_keyboard(new_sleep_state))
-    except Exception:
-        await message.answer(text, reply_markup=get_main_keyboard(new_sleep_state))
-
-# Перехватчик file_id
+# --- ПЕРЕХВАТЧИК КАРТИНОК (Чтобы настроить config.py) ---
 @dp.message(F.photo)
 async def catch_file_id(message: Message):
     file_id = message.photo[-1].file_id
-    await message.reply(f"Перехват file_id картинки:\n\n`{file_id}`", parse_mode="MarkdownV2")
+    await message.reply(
+        f"Отлично! Вот ID этой картинки:\n\n`{file_id}`\n\n"
+        f"Скопируй этот текст и вставь его в файл `config.py` в нужную строчку.", 
+        parse_mode="MarkdownV2"
+    )
 
 if __name__ == "__main__":
     dp.run_polling(bot)
-
